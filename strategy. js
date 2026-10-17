@@ -1,1 +1,136 @@
 
+"use strict";
+
+function mean(a) {
+  return a.reduce((s, n) => s + n, 0) / (a.length || 1);
+}
+
+function ema(values, period) {
+  if (values.length < period) return [];
+  const k = 2 / (period + 1);
+  const out = [mean(values.slice(0, period))];
+
+  for (let i = period; i < values.length; i++) {
+    out.push(values[i] * k + out[out.length - 1] * (1 - k));
+  }
+  return out;
+}
+
+function calculateRSI(closes, period = 14) {
+  if (closes.length <= period) return 50;
+
+  let gains = 0, losses = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d > 0) gains += d;
+    else losses -= d;
+  }
+
+  let avgGain = gains / period;
+  let avgLoss = losses / period;
+
+  for (let i = period + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + Math.max(0, d)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(0, -d)) / period;
+  }
+
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
+}
+
+function analyze(candles) {
+  if (!Array.isArray(candles) || candles.length < 50) {
+    throw new Error("At least 50 candles are required");
+  }
+
+  const closes = candles.map(c => Number(c[4]));
+  const highs = candles.map(c => Number(c[2]));
+  const lows = candles.map(c => Number(c[3]));
+  const volumes = candles.map(c => Number(c[5]));
+
+  if ([...closes, ...highs, ...lows, ...volumes]
+    .some(n => !Number.isFinite(n))) {
+    throw new Error("Invalid candle data");
+  }
+
+  // Ignore the newest candle because it may still be forming.
+  closes.pop();
+  highs.pop();
+  lows.pop();
+  volumes.pop();
+
+  const price = closes.at(-1);
+  const rsi = calculateRSI(closes);
+  const window = closes.slice(-20);
+  const middle = mean(window);
+  const sd = Math.sqrt(mean(window.map(x => (x - middle) ** 2)));
+  const upper = middle + 2 * sd;
+  const lower = middle - 2 * sd;
+
+  const e12 = ema(closes, 12);
+  const e26 = ema(closes, 26);
+  const offset = 26 - 12;
+  const macd = e26.map((v, i) => v - e12[i + offset]);
+  const signalLine = ema(macd, 9);
+  const hist = macd.length && signalLine.length
+    ? macd.at(-1) - signalLine.at(-1) : 0;
+  const oldHist = macd.length > 1 && signalLine.length > 1
+    ? macd.at(-2) - signalLine.at(-2) : hist;
+
+  const trueRanges = [];
+  for (let i = 1; i < closes.length; i++) {
+    trueRanges.push(Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1])
+    ));
+  }
+  const atr = mean(trueRanges.slice(-14));
+  const avgVolume = mean(volumes.slice(-21, -1));
+  const volumeRatio = avgVolume > 0
+    ? volumes.at(-1) / avgVolume : 0;
+
+  let buy = 0, sell = 0;
+  const buyReasons = [], sellReasons = [];
+
+  if (price <= lower * 1.01) {
+    buy++; buyReasons.push("Near lower Bollinger Band");
+  }
+  if (rsi < 35) {
+    buy++; buyReasons.push("RSI oversold");
+  }
+  if (hist > oldHist) {
+    buy++; buyReasons.push("MACD improving");
+  }
+  if (volumeRatio >= 1.3) {
+    buy++; buyReasons.push("Volume confirmation");
+  }
+
+  if (price >= upper * 0.99) {
+    sell++; sellReasons.push("Near upper Bollinger Band");
+  }
+  if (rsi > 65) {
+    sell++; sellReasons.push("RSI overbought");
+  }
+  if (hist < oldHist) {
+    sell++; sellReasons.push("MACD weakening");
+  }
+  if (volumeRatio >= 1.3) {
+    sell++; sellReasons.push("Volume confirmation");
+  }
+
+  let side = "HOLD";
+  if (buy >= 3 && buy > sell) side = "BUY";
+  if (sell >= 3 && sell > buy) side = "SELL";
+
+  return {
+    side, price, rsi, upper, middle, lower, atr,
+    volumeRatio, buyScore: buy, sellScore: sell,
+    reasons: side === "BUY" ? buyReasons
+      : side === "SELL" ? sellReasons : ["No clear reversal"]
+  };
+}
+
+module.exports = { analyze, calculateRSI };
+
